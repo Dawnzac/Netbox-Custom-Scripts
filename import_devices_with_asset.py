@@ -3,6 +3,8 @@ import pynetbox
 import urllib3
 import ipaddress
 import os
+import logging
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from dotenv import load_dotenv
 load_dotenv()
@@ -13,14 +15,27 @@ NETBOX_TOKEN = os.getenv("token")  # Replace with your NetBox API token
 INPUT_CSV = "data.csv"
 FAILED_CSV = "failed_devices.csv"
 SKIPPED_CSV = "skipped_devices.csv"
+LOG_FILE = "device_import.log"
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    filemode='a',
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 nb = pynetbox.api(NETBOX_URL, token=NETBOX_TOKEN)
 nb.http_session.verify = False
 
+def log_print(msg, level="info"):
+    print(msg)
+    getattr(logging, level)(msg)
+
 def get_required(api_endpoint, name, label):
     obj = api_endpoint.get(name=name)
     if obj is None:
-        print(f"[WARNING] {label} '{name}' not found.")
+        log_print(f"[WARNING] {label} '{name}' not found.")
     return obj
 
 failed_rows = []
@@ -61,18 +76,34 @@ with open(INPUT_CSV, newline='') as csvfile:
                     "tenant": tenant.id if tenant else None,
                     "description": row["mac"]
                 })
-                print(f"[INFO] Created device: {row['name']}")
+                log_print(f"[INFO] Created device: {row['name']}")
             else:
-                print(f"[INFO] Device already exists: {row['name']}")
+                log_print(f"[INFO] Device already exists: {row['name']}")
 
             # Link device to inventory asset if serial matches
             try:
-                asset = nb.plugins.inventory.assets.get(serial=row["serial"])
-                if asset:
-                    asset.update({"device": device.id})
-                    print(f"[INFO] Linked asset with serial {row['serial']} to device {row['name']}")
+                assets = nb.http_session.get(
+                    f"{NETBOX_URL}/api/plugins/inventory/assets/",
+                    headers={"Authorization": f"Token {NETBOX_TOKEN}"},
+                    params={"serial": row["serial"]},
+                )
+                if assets.status_code == 200:
+                    asset_data = assets.json().get("results", [])
+                    if asset_data:
+                        asset = asset_data[0]
+                        if asset.get("device") is None:
+                            nb.http_session.patch(asset["url"],
+                                                  headers={"Authorization": f"Token {NETBOX_TOKEN}"},
+                                                  json={"device": device.id})
+                            log_print(f"[INFO] Linked asset with serial {row['serial']} to device {row['name']}")
+                        else:
+                            log_print(f"[INFO] Asset with serial {row['serial']} already assigned. Skipping asset assignment.")
+                    else:
+                        log_print(f"[WARNING] Asset with serial {row['serial']} not found.")
+                else:
+                    log_print(f"[WARNING] Failed to query asset for serial {row['serial']}. HTTP {assets.status_code}")
             except Exception as e:
-                print(f"[WARNING] Could not link asset to device {row['name']}: {e}")
+                log_print(f"[WARNING] Could not link asset to device {row['name']}: {e}")
 
             if ip_address:
                 interface = nb.dcim.interfaces.get(device_id=device.id, name="WAN")
@@ -82,7 +113,7 @@ with open(INPUT_CSV, newline='') as csvfile:
                         "name": "WAN",
                         "type": "1000base-t"
                     })
-                    print(f"[INFO] Created interface 'LAN' for {row['name']}")
+                    log_print(f"[INFO] Created interface 'LAN' for {row['name']}")
 
                 if not ip_obj:
                     ip_obj = nb.ipam.ip_addresses.create({
@@ -93,13 +124,13 @@ with open(INPUT_CSV, newline='') as csvfile:
                         "dns_name": row["name"],
                         "status": "active"
                     })
-                    print(f"[INFO] Created and assigned IP {ip_address} to {row['name']}")
+                    log_print(f"[INFO] Created and assigned IP {ip_address} to {row['name']}")
 
                     if ip_obj and ip_obj.assigned_object_id == interface.id:
                         ip_version = ipaddress.ip_interface(ip_address).version
                         primary_field = "primary_ip4" if ip_version == 4 else "primary_ip6"
                         device.update({primary_field: ip_obj.id})
-                        print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
+                        log_print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
 
                 else:
                     if ip_obj.assigned_object_id is None:
@@ -107,21 +138,21 @@ with open(INPUT_CSV, newline='') as csvfile:
                             "assigned_object_type": "dcim.interface",
                             "assigned_object_id": interface.id
                         })
-                        print(f"[INFO] Assigned existing IP {ip_address} to {row['name']}")
+                        log_print(f"[INFO] Assigned existing IP {ip_address} to {row['name']}")
 
                         if ip_obj and ip_obj.assigned_object_id == interface.id:
                             ip_version = ipaddress.ip_interface(ip_address).version
                             primary_field = "primary_ip4" if ip_version == 4 else "primary_ip6"
                             device.update({primary_field: ip_obj.id})
-                            print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
+                            log_print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
 
                     else:
-                        print(f"[INFO] IP {ip_address} already exists and is assigned. Skipping IP binding.")
+                        log_print(f"[INFO] IP {ip_address} already exists and is assigned. Skipping IP binding.")
                         row["reason"] = f"IP {ip_address} already exists and is assigned"
                         skipped_rows.append(row)
 
         except Exception as e:
-            print(f"[ERROR] {e}. Skipping row for device: {row.get('name', '[unknown]')}")
+            log_print(f"[ERROR] {e}. Skipping row for device: {row.get('name', '[unknown]')}")
             row["reason"] = str(e)
             failed_rows.append(row)
 
@@ -130,13 +161,13 @@ if failed_rows:
         writer = csv.DictWriter(failed_file, fieldnames=fieldnames + ["reason"])
         writer.writeheader()
         writer.writerows(failed_rows)
-    print(f"[INFO] Failed device entries written to: {FAILED_CSV}")
+    log_print(f"[INFO] Failed device entries written to: {FAILED_CSV}")
 
 if skipped_rows:
     with open(SKIPPED_CSV, mode='w', newline='') as skipped_file:
         writer = csv.DictWriter(skipped_file, fieldnames=fieldnames + ["reason"])
         writer.writeheader()
         writer.writerows(skipped_rows)
-    print(f"[INFO] Skipped device entries written to: {SKIPPED_CSV}")
+    log_print(f"[INFO] Skipped device entries written to: {SKIPPED_CSV}")
 else:
-    print("[INFO] All devices and IPs processed successfully.")
+    log_print("[INFO] All devices and IPs processed successfully.")
