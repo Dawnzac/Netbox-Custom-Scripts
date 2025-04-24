@@ -1,1 +1,2 @@
 device_type,status,name,dns_name,tenant,address,comments,serial,mac,role,manufacturer,site
+WAC510,active,AC201,AC201,IT,172.20.101.8,,5B441151A125D,94-A6-7E-67-EA-2F,WiFi AP,Netgear,Academic Block
