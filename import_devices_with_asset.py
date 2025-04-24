@@ -67,25 +67,19 @@ with open(INPUT_CSV, newline='') as csvfile:
 
             # Link device to inventory asset if serial matches
             try:
-                asset_list = nb.extras.plugins['inventory'].assets.filter(serial=row["serial"])
-                if asset_list:
-                    asset = asset_list[0]
-                    if asset.device is None:
-                        asset.update({"device": device.id})
-                        print(f"[INFO] Linked asset with serial {row['serial']} to device {row['name']}")
-                    else:
-                        print(f"[INFO] Asset with serial {row['serial']} already assigned. Skipping asset assignment.")
-                else:
-                    print(f"[WARNING] Asset with serial {row['serial']} not found.")
+                asset = nb.plugins.inventory.assets.get(serial=row["serial"])
+                if asset:
+                    asset.update({"device": device.id})
+                    print(f"[INFO] Linked asset with serial {row['serial']} to device {row['name']}")
             except Exception as e:
                 print(f"[WARNING] Could not link asset to device {row['name']}: {e}")
 
             if ip_address:
-                interface = nb.dcim.interfaces.get(device_id=device.id, name="LAN")
+                interface = nb.dcim.interfaces.get(device_id=device.id, name="WAN")
                 if not interface:
                     interface = nb.dcim.interfaces.create({
                         "device": device.id,
-                        "name": "LAN",
+                        "name": "WAN",
                         "type": "1000base-t"
                     })
                     print(f"[INFO] Created interface 'LAN' for {row['name']}")
@@ -100,6 +94,13 @@ with open(INPUT_CSV, newline='') as csvfile:
                         "status": "active"
                     })
                     print(f"[INFO] Created and assigned IP {ip_address} to {row['name']}")
+
+                    if ip_obj and ip_obj.assigned_object_id == interface.id:
+                        ip_version = ipaddress.ip_interface(ip_address).version
+                        primary_field = "primary_ip4" if ip_version == 4 else "primary_ip6"
+                        device.update({primary_field: ip_obj.id})
+                        print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
+
                 else:
                     if ip_obj.assigned_object_id is None:
                         ip_obj.update({
@@ -107,16 +108,17 @@ with open(INPUT_CSV, newline='') as csvfile:
                             "assigned_object_id": interface.id
                         })
                         print(f"[INFO] Assigned existing IP {ip_address} to {row['name']}")
+
+                        if ip_obj and ip_obj.assigned_object_id == interface.id:
+                            ip_version = ipaddress.ip_interface(ip_address).version
+                            primary_field = "primary_ip4" if ip_version == 4 else "primary_ip6"
+                            device.update({primary_field: ip_obj.id})
+                            print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
+
                     else:
                         print(f"[INFO] IP {ip_address} already exists and is assigned. Skipping IP binding.")
                         row["reason"] = f"IP {ip_address} already exists and is assigned"
                         skipped_rows.append(row)
-
-                if ip_obj and ip_obj.assigned_object_id == interface.id:
-                    ip_version = ipaddress.ip_interface(ip_address).version
-                    primary_field = "primary_ip4" if ip_version == 4 else "primary_ip6"
-                    device.update({primary_field: ip_obj.id})
-                    print(f"[INFO] Set {ip_address} as primary IP for {row['name']}")
 
         except Exception as e:
             print(f"[ERROR] {e}. Skipping row for device: {row.get('name', '[unknown]')}")
