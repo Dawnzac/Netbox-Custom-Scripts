@@ -4,6 +4,7 @@ import urllib3
 import ipaddress
 import os
 from dotenv import load_dotenv
+load_dotenv()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 NETBOX_URL = os.getenv("server")  # Replace with your NetBox URL
